@@ -2,7 +2,6 @@ import re
 import base64
 import argparse
 import requests
-import binascii
 import os
 from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,6 +34,24 @@ def normalize_url(url):
     return url
 
 # ===============================
+# 📌 Проверка валидности URL (фильтрация мусорных строк)
+# ===============================
+def is_valid_url(url):
+    try:
+        result = urlparse(url)
+        if result.scheme not in ("http", "https", ""):
+            return False
+        if result.scheme and not result.netloc:
+            return False
+        # Отфильтровываем URL с мусорными символами, часто встречающимися в JS-объектах
+        bad_chars = [",", "{", "}", "!", "$", ";", ":", "\"", "'", " "]
+        if any(c in url for c in bad_chars):
+            return False
+        return True
+    except Exception:
+        return False
+
+# ===============================
 # 📌 Получение JS-кода с сайта или из файла
 # ===============================
 def get_js_content(source):
@@ -50,16 +67,15 @@ def get_js_content(source):
             return f.read()
 
 # ===============================
-# 📌 Извлечение конечных точек (эндпоинтов)
+# 📌 Извлечение конечных точек (эндпоинтов) с фильтрацией
 # ===============================
 def extract_endpoints(js_code, base_url=None):
     matches = re.findall(pattern, js_code)
     results = set()
     for match in matches:
-        if base_url:
-            results.add(urljoin(base_url, match))
-        else:
-            results.add(match)
+        full_url = urljoin(base_url, match) if base_url else match
+        if is_valid_url(full_url):
+            results.add(full_url)
     return results
 
 # ===============================
@@ -81,7 +97,6 @@ def get_base_url(url):
 def find_secrets(js_code):
     found = set()
     for keyword in SECRET_KEYWORDS:
-        # Ищем в любом регистре
         pattern = re.compile(rf"{keyword}['\"]?\s*[:=]\s*['\"]([^'\"]+)['\"]", re.I)
         for m in pattern.findall(js_code):
             found.add(f"{keyword}: {m}")
@@ -92,18 +107,15 @@ def find_secrets(js_code):
 # ===============================
 def decode_encoded_strings(js_code):
     decoded_strings = set()
-    # Ищем base64-подобные строки (более 8 символов и кратные 4)
     base64_pattern = re.compile(r'([A-Za-z0-9+/=]{8,})')
     for b64 in base64_pattern.findall(js_code):
         try:
-            # Пробуем декодировать base64
             decoded = base64.b64decode(b64).decode('utf-8')
-            if len(decoded) > 4:  # Отфильтруем короткие мусорные строки
+            if len(decoded) > 4:
                 decoded_strings.add(decoded)
         except Exception:
             pass
 
-    # Ищем URL-кодированные строки
     url_encoded_pattern = re.compile(r'%[0-9a-fA-F]{2,}')
     for match in url_encoded_pattern.findall(js_code):
         try:
@@ -112,7 +124,6 @@ def decode_encoded_strings(js_code):
         except Exception:
             pass
 
-    # Ищем hex-кодированные строки (например, \x41\x42)
     hex_pattern = re.compile(r'(?:\\x[0-9a-fA-F]{2})+')
     for match in hex_pattern.findall(js_code):
         try:
@@ -197,11 +208,9 @@ def main():
     if not urls:
         parser.error("Нужно указать хотя бы -u или -l")
 
-    # Если указан output-dir, подготовим папки
     if args.output_dir:
         output_dirs = prepare_output_dirs(args.output_dir)
     else:
-        # По умолчанию результаты в текущей папке без подпапок
         output_dirs = {
             "endpoints": ".",
             "active": ".",
@@ -217,7 +226,6 @@ def main():
             if not base_url and source.startswith(("http://", "https://")):
                 base_url = get_base_url(source)
 
-            # Декодируем закодированные строки и добавляем к исходному коду
             decoded_strings = decode_encoded_strings(js_code)
             combined_code = js_code + "\n" + "\n".join(decoded_strings)
 
@@ -269,7 +277,6 @@ def main():
 
         except Exception as e:
             print(f"[-] Ошибка при обработке {source}: {e}")
-
 
 if __name__ == "__main__":
     main()
