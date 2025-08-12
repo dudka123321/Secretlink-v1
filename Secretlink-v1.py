@@ -118,28 +118,35 @@ def print_logo():
     print("SecretLink - JS Endpoint & Secrets Extractor\n")
 
 def prepare_output_dirs(base_dir, active_enabled):
-    # Основная папка endpoints и внутри - maindomain и otherdomain
+    subfolders = ["path", "content", "static"]
+
+    # endpoints: maindomain и otherdomain + их подкаталоги
     endpoints_base = os.path.join(base_dir, "endpoints")
     maindomain_dir = os.path.join(endpoints_base, "maindomain")
     otherdomain_dir = os.path.join(endpoints_base, "otherdomain")
-    
-    # Подкаталоги для каждого из них
-    subfolders = ["path", "content", "static"]
-
     for parent in [maindomain_dir, otherdomain_dir]:
         for sf in subfolders:
             os.makedirs(os.path.join(parent, sf), exist_ok=True)
 
-    # Папка secrets
+    # secrets
     secrets_dir = os.path.join(base_dir, "secrets")
     os.makedirs(secrets_dir, exist_ok=True)
 
-    # Папка active с такой же иерархией, если включена проверка активности
-    active_dir = None
+    active_dirs = None
     if active_enabled:
-        active_dir = os.path.join(base_dir, "active")
-        for sf in subfolders:
-            os.makedirs(os.path.join(active_dir, sf), exist_ok=True)
+        # active: тоже maindomain и otherdomain с подкаталогами
+        active_base = os.path.join(base_dir, "active")
+        active_maindomain = os.path.join(active_base, "maindomain")
+        active_otherdomain = os.path.join(active_base, "otherdomain")
+        for parent in [active_maindomain, active_otherdomain]:
+            for sf in subfolders:
+                os.makedirs(os.path.join(parent, sf), exist_ok=True)
+        active_dirs = {
+            "base": active_base,
+            "maindomain": active_maindomain,
+            "otherdomain": active_otherdomain,
+            "subfolders": subfolders
+        }
 
     return {
         "endpoints": {
@@ -148,66 +155,45 @@ def prepare_output_dirs(base_dir, active_enabled):
             "subfolders": subfolders
         },
         "secrets": secrets_dir,
-        "active": {
-            "base": active_dir,
-            "subfolders": subfolders
-        } if active_dir else None
+        "active": active_dirs
     }
 
-def classify_and_save_endpoints(endpoints, base_domain, endpoints_dirs):
-    """
-    Разложить endpoints по папкам в зависимости от домена и типа файла (path, content, static)
-    """
-    def get_domain(url):
-        try:
-            return urlparse(url).netloc
-        except:
-            return ""
-
-    def get_path(url):
-        try:
-            return urlparse(url).path
-        except:
-            return ""
-
-    # Расширения для категорий
+def classify_endpoint(url):
     content_exts = (
         ".jpg", ".jpeg", ".png", ".svg", ".gif", ".webp", ".bmp", ".ico",
         ".tiff", ".heic", ".avif", ".mp3", ".mp4", ".pdf"
     )
     static_exts = (".html", ".htm", ".js", ".css", ".json", ".xml", ".txt")
 
-    def classify_endpoint(url):
-        path = get_path(url).lower()
-
-        if path in ("", "/"):
-            return "path"
-
-        for ext in content_exts:
-            if path.endswith(ext):
-                return "content"
-
-        for ext in static_exts:
-            if path.endswith(ext):
-                return "static"
-
+    path = urlparse(url).path.lower()
+    if path in ("", "/"):
         return "path"
 
-    def domain_type(domain):
-        return "maindomain" if domain == base_domain else "otherdomain"
+    for ext in content_exts:
+        if path.endswith(ext):
+            return "content"
 
+    for ext in static_exts:
+        if path.endswith(ext):
+            return "static"
+
+    return "path"
+
+def domain_type(domain, base_domain):
+    return "maindomain" if domain == base_domain else "otherdomain"
+
+def classify_and_save_endpoints(endpoints, base_domain, endpoints_dirs):
     categorized = {
         "maindomain": {sf: [] for sf in endpoints_dirs["subfolders"]},
         "otherdomain": {sf: [] for sf in endpoints_dirs["subfolders"]},
     }
 
     for ep in endpoints:
-        dom = get_domain(ep)
-        d_type = domain_type(dom)
+        dom = urlparse(ep).netloc
+        d_type = domain_type(dom, base_domain)
         class_type = classify_endpoint(ep)
         categorized[d_type][class_type].append(ep)
 
-    # Запись в файлы в папках endpoints
     for d_type in ["maindomain", "otherdomain"]:
         base_path = endpoints_dirs[d_type]
         for sf in endpoints_dirs["subfolders"]:
@@ -218,53 +204,30 @@ def classify_and_save_endpoints(endpoints, base_domain, endpoints_dirs):
                     for line in lst:
                         f.write(line + "\n")
 
-def save_active_endpoints(active_endpoints, active_dirs):
-    if not active_dirs or not active_dirs["base"]:
+def save_active_endpoints(active_endpoints, base_domain, active_dirs):
+    if not active_dirs:
         return
 
-    content_exts = (
-        ".jpg", ".jpeg", ".png", ".svg", ".gif", ".webp", ".bmp", ".ico",
-        ".tiff", ".heic", ".avif", ".mp3", ".mp4", ".pdf"
-    )
-    static_exts = (".html", ".htm", ".js", ".css", ".json", ".xml", ".txt")
-
-    def get_path(url):
-        try:
-            return urlparse(url).path
-        except:
-            return ""
-
-    def classify_endpoint(url):
-        path = get_path(url).lower()
-        if path in ("", "/"):
-            return "path"
-
-        for ext in content_exts:
-            if path.endswith(ext):
-                return "content"
-
-        for ext in static_exts:
-            if path.endswith(ext):
-                return "static"
-
-        return "path"
-
-    subfolders = active_dirs["subfolders"]
-    base_path = active_dirs["base"]
-
-    categorized = {sf: [] for sf in subfolders}
+    categorized = {
+        "maindomain": {sf: [] for sf in active_dirs["subfolders"]},
+        "otherdomain": {sf: [] for sf in active_dirs["subfolders"]},
+    }
 
     for ep in active_endpoints:
+        dom = urlparse(ep).netloc
+        d_type = domain_type(dom, base_domain)
         class_type = classify_endpoint(ep)
-        categorized[class_type].append(ep)
+        categorized[d_type][class_type].append(ep)
 
-    for sf in subfolders:
-        lst = sorted(set(categorized[sf]))
-        if lst:
-            file_path = os.path.join(base_path, sf, f"{sf}_active_endpoints.txt")
-            with open(file_path, "a", encoding="utf-8") as f:
-                for line in lst:
-                    f.write(line + "\n")
+    for d_type in ["maindomain", "otherdomain"]:
+        base_path = active_dirs[d_type]
+        for sf in active_dirs["subfolders"]:
+            lst = sorted(set(categorized[d_type][sf]))
+            if lst:
+                file_path = os.path.join(base_path, sf, f"{sf}_active_endpoints.txt")
+                with open(file_path, "a", encoding="utf-8") as f:
+                    for line in lst:
+                        f.write(line + "\n")
 
 def main():
     print_logo()
@@ -297,6 +260,7 @@ def main():
     if args.output_dir:
         output_dirs = prepare_output_dirs(args.output_dir, active_enabled=args.active)
     else:
+        # создаём папки по умолчанию (упрощённо)
         output_dirs = {
             "endpoints": {
                 "maindomain": "endpoints/maindomain",
@@ -304,16 +268,20 @@ def main():
                 "subfolders": ["path", "content", "static"]
             },
             "secrets": "secrets",
-            "active": {
-                "base": "active",
-                "subfolders": ["path", "content", "static"]
-            } if args.active else None
+            "active": None
         }
         for d in [output_dirs["endpoints"]["maindomain"], output_dirs["endpoints"]["otherdomain"], output_dirs["secrets"]]:
             os.makedirs(d, exist_ok=True)
         if args.active:
-            for sf in output_dirs["active"]["subfolders"]:
-                os.makedirs(os.path.join(output_dirs["active"]["base"], sf), exist_ok=True)
+            output_dirs["active"] = {
+                "base": "active",
+                "maindomain": os.path.join("active", "maindomain"),
+                "otherdomain": os.path.join("active", "otherdomain"),
+                "subfolders": ["path", "content", "static"]
+            }
+            for parent in [output_dirs["active"]["maindomain"], output_dirs["active"]["otherdomain"]]:
+                for sf in output_dirs["active"]["subfolders"]:
+                    os.makedirs(os.path.join(parent, sf), exist_ok=True)
 
     for source in urls:
         print(f"\n[+] Идёт сканирование: {source}")
@@ -368,8 +336,8 @@ def main():
 
                 if active_endpoints:
                     print(f"[+] Активных эндпоинтов найдено: {len(active_endpoints)}")
-                    save_active_endpoints(active_endpoints, output_dirs["active"])
-                    print(f"[+] Активные эндпоинты сохранены в папках active/path, active/content, active/static")
+                    save_active_endpoints(active_endpoints, base_domain, output_dirs["active"])
+                    print(f"[+] Активные эндпоинты сохранены в папках active/maindomain и active/otherdomain")
                 else:
                     print("[-] Активных эндпоинтов не найдено.")
 
