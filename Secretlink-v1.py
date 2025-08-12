@@ -2,27 +2,14 @@ import re
 import base64
 import argparse
 import requests
-import codecs
 import binascii
-import urllib.parse
+import os
 from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
-def print_logo():
-    logo = r"""
-   _____                     _    _ _       
-  / ____|                   | |  | (_)      
- | (___  _   _ _ __ ___ ___ | |  | |_  __ _ 
-  \___ \| | | | '__/ __/ _ \| |  | | |/ _` |
-  ____) | |_| | | | (_| (_) | |__| | | (_| |
- |_____/ \__,_|_|  \___\___/ \____/|_|\__,_|
-
-    SecretLink - JS Endpoint & Secret Extractor
-    """
-    print(logo)
-
-# Регулярка для поиска URL и путей в JS коде
+# ===============================
+# 📌 Регулярное выражение для поиска URL и путей в JS коде
+# ===============================
 pattern = re.compile(
     r"""(?:"|')((?:[a-zA-Z]{1,10}://|//)[^"'\s]{1,}
     |(?:/|\.\./|\./)[^"'\s<>]{1,}
@@ -30,43 +17,41 @@ pattern = re.compile(
     re.VERBOSE
 )
 
-# Регулярка для поиска base64-строк (классический вариант)
-base64_pattern = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
-
-# Регулярка для поиска hex-строк (минимум 20 символов)
-hex_pattern = re.compile(r'\b[0-9a-fA-F]{20,}\b')
-
-# Регулярка для поиска URL-кодированных строк (содержат %)
-urlencoded_pattern = re.compile(r'%[0-9A-Fa-f]{2,}[%0-9A-Fa-f]*')
-
-# Ключевые слова для поиска секретов
+# ===============================
+# 📌 Ключевые слова для поиска секретов
+# ===============================
 SECRET_KEYWORDS = [
-    "api_key", "apikey", "api-key", "secret", "token", "auth", "passwd", "password",
-    "access_token", "session", "credentials", "key", "jwt", "admin", "authorization",
-    "secret_key", "client_secret", "private_key", "db_password", "auth_token"
+    "api_key", "apikey", "api-key", "secret", "token", "auth", "password",
+    "passwd", "pwd", "admin", "access_token", "auth_token", "client_secret",
+    "private_key", "jwt", "sessionid", "cookie", "secret_key"
 ]
 
-# Кеш для проверки активности
-active_check_cache = {}
-cache_lock = threading.Lock()
-
+# ===============================
+# 📌 Нормализация URL (добавляет https:// если нет протокола)
+# ===============================
 def normalize_url(url):
     if not url.startswith(("http://", "https://")):
         return "https://" + url
     return url
 
+# ===============================
+# 📌 Получение JS-кода с сайта или из файла
+# ===============================
 def get_js_content(source):
     if not source.startswith("http") and ("/" in source or "." in source):
         source = "https://" + source
 
     if source.startswith("http"):
-        resp = requests.get(source, timeout=10)
+        resp = requests.get(source)
         resp.raise_for_status()
         return resp.text
     else:
         with open(source, "r", encoding="utf-8", errors="ignore") as f:
             return f.read()
 
+# ===============================
+# 📌 Извлечение конечных точек (эндпоинтов)
+# ===============================
 def extract_endpoints(js_code, base_url=None):
     matches = re.findall(pattern, js_code)
     results = set()
@@ -77,6 +62,9 @@ def extract_endpoints(js_code, base_url=None):
             results.add(match)
     return results
 
+# ===============================
+# 📌 Получение базового URL из полного
+# ===============================
 def get_base_url(url):
     parsed = urlparse(url)
     path = parsed.path
@@ -87,144 +75,121 @@ def get_base_url(url):
     base = f"{parsed.scheme}://{parsed.netloc}{path}"
     return base
 
+# ===============================
+# 📌 Поиск секретов по ключевым словам
+# ===============================
 def find_secrets(js_code):
-    secrets_found = set()
-    lower_text = js_code.lower()
-    for key in SECRET_KEYWORDS:
-        # Ищем ключевые слова с контекстом +/- 50 символов
-        for match in re.finditer(r'(?i)(.{0,50}' + re.escape(key) + r'.{0,50})', lower_text):
-            snippet = js_code[match.start():match.end()]
-            # Ищем в snippet строковые значения (в кавычках)
-            secret_matches = re.findall(r'(?:"|\')([A-Za-z0-9_\-+=/]{8,})["\']', snippet)
-            secrets_found.update(secret_matches)
-    return secrets_found
+    found = set()
+    for keyword in SECRET_KEYWORDS:
+        # Ищем в любом регистре
+        pattern = re.compile(rf"{keyword}['\"]?\s*[:=]\s*['\"]([^'\"]+)['\"]", re.I)
+        for m in pattern.findall(js_code):
+            found.add(f"{keyword}: {m}")
+    return found
 
-def try_base64_decode(s):
+# ===============================
+# 📌 Декодирование base64 и других популярных кодировок (URL, hex)
+# ===============================
+def decode_encoded_strings(js_code):
+    decoded_strings = set()
+    # Ищем base64-подобные строки (более 8 символов и кратные 4)
+    base64_pattern = re.compile(r'([A-Za-z0-9+/=]{8,})')
+    for b64 in base64_pattern.findall(js_code):
+        try:
+            # Пробуем декодировать base64
+            decoded = base64.b64decode(b64).decode('utf-8')
+            if len(decoded) > 4:  # Отфильтруем короткие мусорные строки
+                decoded_strings.add(decoded)
+        except Exception:
+            pass
+
+    # Ищем URL-кодированные строки
+    url_encoded_pattern = re.compile(r'%[0-9a-fA-F]{2,}')
+    for match in url_encoded_pattern.findall(js_code):
+        try:
+            decoded = requests.utils.unquote(match)
+            decoded_strings.add(decoded)
+        except Exception:
+            pass
+
+    # Ищем hex-кодированные строки (например, \x41\x42)
+    hex_pattern = re.compile(r'(?:\\x[0-9a-fA-F]{2})+')
+    for match in hex_pattern.findall(js_code):
+        try:
+            hex_str = match.replace("\\x", "")
+            bytes_obj = bytes.fromhex(hex_str)
+            decoded = bytes_obj.decode('utf-8')
+            decoded_strings.add(decoded)
+        except Exception:
+            pass
+
+    return decoded_strings
+
+# ===============================
+# 📌 Проверка эндпоинтов на активность (HTTP статус 200)
+# ===============================
+def check_endpoint_active(url):
     try:
-        # Пытаемся декодировать base64 и получить utf-8 строку
-        decoded_bytes = base64.b64decode(s, validate=True)
-        decoded_text = decoded_bytes.decode('utf-8', errors='ignore')
-        return decoded_text if decoded_text else None
-    except Exception:
-        return None
-
-def try_hex_decode(s):
-    try:
-        decoded_bytes = binascii.unhexlify(s)
-        decoded_text = decoded_bytes.decode('utf-8', errors='ignore')
-        return decoded_text if decoded_text else None
-    except Exception:
-        return None
-
-def try_url_decode(s):
-    try:
-        decoded = urllib.parse.unquote(s)
-        return decoded if decoded != s else None
-    except Exception:
-        return None
-
-def try_rot13_decode(s):
-    try:
-        return s.encode('rot_13').decode('utf-8')
-    except Exception:
-        # В Python3 лучше так:
-        return codecs.decode(s, 'rot_13')
-
-def extract_encoded_strings(js_code):
-    # Находим возможные base64, hex, urlencoded подстроки
-    base64s = base64_pattern.findall(js_code)
-    hexs = hex_pattern.findall(js_code)
-    urlencs = urlencoded_pattern.findall(js_code)
-    return base64s, hexs, urlencs
-
-def print_progress(iteration, total, prefix='', suffix='', decimals=1, bar_length=30):
-    percent = f"{100 * (iteration / float(total)):.{decimals}f}"
-    filled_length = int(bar_length * iteration // total)
-    bar = '█' * filled_length + '-' * (bar_length - filled_length)
-    print(f'\r{prefix} |{bar}| {percent}% {suffix}', end='')
-    if iteration == total:
-        print()
-
-def check_url_active(url, timeout=5):
-    with cache_lock:
-        if url in active_check_cache:
-            return active_check_cache[url]
-    try:
-        resp = requests.head(url, allow_redirects=True, timeout=timeout)
-        active = resp.status_code < 400
-    except Exception:
-        active = False
-    with cache_lock:
-        active_check_cache[url] = active
-    return active
-
-def check_active_endpoints(endpoints, max_workers=10):
-    active_eps = set()
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_url = {executor.submit(check_url_active, url): url for url in endpoints}
-        total = len(endpoints)
-        for i, future in enumerate(as_completed(future_to_url), 1):
-            url = future_to_url[future]
-            print_progress(i, total, prefix='Проверка эндпоинтов:', suffix=f'{i}/{total}')
-            try:
-                if future.result():
-                    active_eps.add(url)
-            except Exception:
-                pass
-    return active_eps
-
-def decode_all_variants(js_code):
-    decoded_chunks = []
-
-    base64s, hexs, urlencs = extract_encoded_strings(js_code)
-
-    # Base64 decode
-    for s in base64s:
-        d = try_base64_decode(s)
-        if d:
-            decoded_chunks.append(d)
-
-    # Hex decode
-    for s in hexs:
-        d = try_hex_decode(s)
-        if d:
-            decoded_chunks.append(d)
-
-    # URL decode
-    for s in urlencs:
-        d = try_url_decode(s)
-        if d:
-            decoded_chunks.append(d)
-
-    # ROT13 decode (проверим весь текст)
-    try:
-        import codecs
-        rot13_decoded = codecs.decode(js_code, 'rot_13')
-        if rot13_decoded and rot13_decoded != js_code:
-            decoded_chunks.append(rot13_decoded)
+        resp = requests.head(url, timeout=5, allow_redirects=True)
+        if resp.status_code == 200:
+            return url
     except Exception:
         pass
+    return None
 
-    return decoded_chunks
+# ===============================
+# 📌 Функция для печати логотипа
+# ===============================
+def print_logo():
+    logo = r"""
+  _____                 _             _       
+ / ____|               | |           | |      
+| (___   ___  ___ _   _| | ___  _ __ | |_ ___ 
+ \___ \ / _ \/ __| | | | |/ _ \| '_ \| __/ __|
+ ____) |  __/ (__| |_| | | (_) | | | | |_\__ \
+|_____/ \___|\___|\__,_|_|\___/|_| |_|\__|___/
+                                              
+"""
+    print(logo)
+    print("SecretLink - JS Endpoint & Secrets Extractor\n")
 
+# ===============================
+# 📌 Создание директорий для сохранения результатов
+# ===============================
+def prepare_output_dirs(base_dir):
+    dirs = {
+        "endpoints": os.path.join(base_dir, "endpoints"),
+        "active": os.path.join(base_dir, "active"),
+        "secrets": os.path.join(base_dir, "secrets"),
+    }
+    for d in dirs.values():
+        os.makedirs(d, exist_ok=True)
+    return dirs
 
+# ===============================
+# 📌 Основная логика
+# ===============================
 def main():
-    parser = argparse.ArgumentParser(
-        description="SecretLink — Extract endpoints and secrets from JS files/URLs",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
-    parser.add_argument("-u", "--url", help="Один URL или локальный файл для сканирования")
-    parser.add_argument("-l", "--list", help="Файл со списком URL или путей для сканирования")
-    parser.add_argument("-b", "--base", help="Базовый URL для относительных путей")
-    parser.add_argument("-a", "--active", action="store_true", help="Проверять найденные эндпоинты на активность")
-    parser.add_argument("-t", "--threads", type=int, default=10, help="Количество потоков для проверки активности (по умолчанию 10)")
-    args = parser.parse_args()
-
     print_logo()
 
+    parser = argparse.ArgumentParser(
+        description="SecretLink - Extract JS endpoints and secrets with optional active checking"
+    )
+
+    parser.add_argument("-u", "--url", help="Один URL для сканирования")
+    parser.add_argument("-l", "--list", help="Файл со списком URL для сканирования")
+    parser.add_argument("-b", "--base", help="Базовый URL для относительных путей")
+    parser.add_argument("-a", "--active", action="store_true", help="Проверять активность эндпоинтов")
+    parser.add_argument("-o", "--output-dir", help="Папка для сохранения результатов (создаст подпапки endpoints/, active/, secrets/)")
+    parser.add_argument("-t", "--threads", type=int, default=10, help="Количество потоков для проверки активности (по умолчанию 10)")
+
+    args = parser.parse_args()
+
     urls = []
+
     if args.url:
         urls.append(normalize_url(args.url))
+
     if args.list:
         with open(args.list, "r", encoding="utf-8") as f:
             urls.extend(normalize_url(line.strip()) for line in f if line.strip())
@@ -232,11 +197,19 @@ def main():
     if not urls:
         parser.error("Нужно указать хотя бы -u или -l")
 
-    all_endpoints = set()
-    all_secrets = set()
+    # Если указан output-dir, подготовим папки
+    if args.output_dir:
+        output_dirs = prepare_output_dirs(args.output_dir)
+    else:
+        # По умолчанию результаты в текущей папке без подпапок
+        output_dirs = {
+            "endpoints": ".",
+            "active": ".",
+            "secrets": "."
+        }
 
-    for i, source in enumerate(urls, 1):
-        print(f"\n[{i}/{len(urls)}] Сканирование: {source}")
+    for source in urls:
+        print(f"\n[+] Идёт сканирование: {source}")
         try:
             js_code = get_js_content(source)
 
@@ -244,52 +217,59 @@ def main():
             if not base_url and source.startswith(("http://", "https://")):
                 base_url = get_base_url(source)
 
-            # Получаем все варианты декодированных данных
-            decoded_chunks = decode_all_variants(js_code)
+            # Декодируем закодированные строки и добавляем к исходному коду
+            decoded_strings = decode_encoded_strings(js_code)
+            combined_code = js_code + "\n" + "\n".join(decoded_strings)
 
-            # Объединяем исходный код и все декодированные варианты
-            combined_text = "\n".join([js_code] + decoded_chunks)
+            endpoints = extract_endpoints(combined_code, base_url)
+            secrets = find_secrets(combined_code)
 
-            endpoints = extract_endpoints(combined_text, base_url)
-            secrets = find_secrets(combined_text)
+            if endpoints:
+                print(f"[+] Найдено {len(endpoints)} эндпоинтов:")
+                for ep in sorted(endpoints):
+                    print(ep)
 
-            all_endpoints.update(endpoints)
-            all_secrets.update(secrets)
+                with open(os.path.join(output_dirs["endpoints"], "endpoints.txt"), "a", encoding="utf-8") as f:
+                    for ep in sorted(endpoints):
+                        f.write(ep + "\n")
+                print(f"[+] Эндпоинты сохранены в {os.path.join(output_dirs['endpoints'], 'endpoints.txt')}")
+            else:
+                print("[-] Эндпоинтов не найдено.")
 
-            print(f"[+] Найдено эндпоинтов: {len(endpoints)}")
-            print(f"[+] Найдено потенциальных секретов: {len(secrets)}")
+            if secrets:
+                print(f"[+] Найдено {len(secrets)} секретов:")
+                for secret in sorted(secrets):
+                    print(secret)
+
+                with open(os.path.join(output_dirs["secrets"], "secrets.txt"), "a", encoding="utf-8") as f:
+                    for secret in sorted(secrets):
+                        f.write(secret + "\n")
+                print(f"[+] Секреты сохранены в {os.path.join(output_dirs['secrets'], 'secrets.txt')}")
+            else:
+                print("[-] Секретов не найдено.")
+
+            if args.active and endpoints:
+                print(f"[+] Проверяем активность эндпоинтов (потоки: {args.threads})...")
+                active_endpoints = set()
+                with ThreadPoolExecutor(max_workers=args.threads) as executor:
+                    futures = {executor.submit(check_endpoint_active, ep): ep for ep in endpoints}
+                    for future in as_completed(futures):
+                        result = future.result()
+                        if result:
+                            active_endpoints.add(result)
+
+                if active_endpoints:
+                    print(f"[+] Активных эндпоинтов найдено: {len(active_endpoints)}")
+                    with open(os.path.join(output_dirs["active"], "active_endpoints.txt"), "a", encoding="utf-8") as f:
+                        for ep in sorted(active_endpoints):
+                            f.write(ep + "\n")
+                    print(f"[+] Активные эндпоинты сохранены в {os.path.join(output_dirs['active'], 'active_endpoints.txt')}")
+                else:
+                    print("[-] Активных эндпоинтов не найдено.")
 
         except Exception as e:
             print(f"[-] Ошибка при обработке {source}: {e}")
 
-    # Записываем результаты
-    if all_endpoints:
-        with open("endpoints.txt", "w", encoding="utf-8") as f:
-            for ep in sorted(all_endpoints):
-                f.write(ep + "\n")
-        print("[+] Эндпоинты сохранены в endpoints.txt")
-    else:
-        print("[-] Эндпоинтов не найдено.")
-
-    if all_secrets:
-        with open("secrets.txt", "w", encoding="utf-8") as f:
-            for secret in sorted(all_secrets):
-                f.write(secret + "\n")
-        print("[+] Секреты сохранены в secrets.txt")
-    else:
-        print("[-] Секретов не найдено.")
-
-    # Если включена проверка активности - запускаем многопоточную проверку
-    if args.active and all_endpoints:
-        print("\n=== Проверка активности эндпоинтов ===")
-        active_eps = check_active_endpoints(all_endpoints, max_workers=args.threads)
-        if active_eps:
-            with open("active_endpoints.txt", "w", encoding="utf-8") as f:
-                for ep in sorted(active_eps):
-                    f.write(ep + "\n")
-            print(f"[+] Активных эндпоинтов: {len(active_eps)} (сохранены в active_endpoints.txt)")
-        else:
-            print("[-] Активных эндпоинтов не найдено.")
 
 if __name__ == "__main__":
     main()
