@@ -34,24 +34,6 @@ def normalize_url(url):
     return url
 
 # ===============================
-# 📌 Проверка валидности URL (фильтрация мусорных строк)
-# ===============================
-def is_valid_url(url):
-    try:
-        result = urlparse(url)
-        if result.scheme not in ("http", "https", ""):
-            return False
-        if result.scheme and not result.netloc:
-            return False
-        # Отфильтровываем URL с мусорными символами, часто встречающимися в JS-объектах
-        bad_chars = [",", "{", "}", "!", "$", ";", ":", "\"", "'", " "]
-        if any(c in url for c in bad_chars):
-            return False
-        return True
-    except Exception:
-        return False
-
-# ===============================
 # 📌 Получение JS-кода с сайта или из файла
 # ===============================
 def get_js_content(source):
@@ -67,15 +49,16 @@ def get_js_content(source):
             return f.read()
 
 # ===============================
-# 📌 Извлечение конечных точек (эндпоинтов) с фильтрацией
+# 📌 Извлечение конечных точек (эндпоинтов)
 # ===============================
 def extract_endpoints(js_code, base_url=None):
     matches = re.findall(pattern, js_code)
     results = set()
     for match in matches:
-        full_url = urljoin(base_url, match) if base_url else match
-        if is_valid_url(full_url):
-            results.add(full_url)
+        if base_url:
+            results.add(urljoin(base_url, match))
+        else:
+            results.add(match)
     return results
 
 # ===============================
@@ -167,12 +150,14 @@ def print_logo():
 # ===============================
 # 📌 Создание директорий для сохранения результатов
 # ===============================
-def prepare_output_dirs(base_dir):
+def prepare_output_dirs(base_dir, active_enabled):
     dirs = {
         "endpoints": os.path.join(base_dir, "endpoints"),
-        "active": os.path.join(base_dir, "active"),
         "secrets": os.path.join(base_dir, "secrets"),
     }
+    if active_enabled:
+        dirs["active"] = os.path.join(base_dir, "active")
+
     for d in dirs.values():
         os.makedirs(d, exist_ok=True)
     return dirs
@@ -208,14 +193,16 @@ def main():
     if not urls:
         parser.error("Нужно указать хотя бы -u или -l")
 
+    # Если указан output-dir, подготовим папки (учитываем, создавать ли папку active)
     if args.output_dir:
-        output_dirs = prepare_output_dirs(args.output_dir)
+        output_dirs = prepare_output_dirs(args.output_dir, active_enabled=args.active)
     else:
         output_dirs = {
             "endpoints": ".",
-            "active": ".",
             "secrets": "."
         }
+        if args.active:
+            output_dirs["active"] = "."
 
     for source in urls:
         print(f"\n[+] Идёт сканирование: {source}")
@@ -250,8 +237,10 @@ def main():
                     print(secret)
 
                 with open(os.path.join(output_dirs["secrets"], "secrets.txt"), "a", encoding="utf-8") as f:
+                    f.write(f"[Источник: {source}]\n")
                     for secret in sorted(secrets):
                         f.write(secret + "\n")
+                    f.write("\n")
                 print(f"[+] Секреты сохранены в {os.path.join(output_dirs['secrets'], 'secrets.txt')}")
             else:
                 print("[-] Секретов не найдено.")
@@ -277,6 +266,7 @@ def main():
 
         except Exception as e:
             print(f"[-] Ошибка при обработке {source}: {e}")
+
 
 if __name__ == "__main__":
     main()
