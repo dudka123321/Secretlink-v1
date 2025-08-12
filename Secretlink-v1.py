@@ -6,9 +6,6 @@ import os
 from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ===============================
-# 📌 Регулярное выражение для поиска URL и путей в JS коде
-# ===============================
 pattern = re.compile(
     r"""(?:"|')((?:[a-zA-Z]{1,10}://|//)[^"'\s]{1,}
     |(?:/|\.\./|\./)[^"'\s<>]{1,}
@@ -16,26 +13,17 @@ pattern = re.compile(
     re.VERBOSE
 )
 
-# ===============================
-# 📌 Ключевые слова для поиска секретов
-# ===============================
 SECRET_KEYWORDS = [
     "api_key", "apikey", "api-key", "secret", "token", "auth", "password",
     "passwd", "pwd", "admin", "access_token", "auth_token", "client_secret",
     "private_key", "jwt", "sessionid", "cookie", "secret_key"
 ]
 
-# ===============================
-# 📌 Нормализация URL (добавляет https:// если нет протокола)
-# ===============================
 def normalize_url(url):
     if not url.startswith(("http://", "https://")):
         return "https://" + url
     return url
 
-# ===============================
-# 📌 Получение JS-кода с сайта или из файла
-# ===============================
 def get_js_content(source):
     if not source.startswith("http") and ("/" in source or "." in source):
         source = "https://" + source
@@ -48,9 +36,6 @@ def get_js_content(source):
         with open(source, "r", encoding="utf-8", errors="ignore") as f:
             return f.read()
 
-# ===============================
-# 📌 Извлечение конечных точек (эндпоинтов)
-# ===============================
 def extract_endpoints(js_code, base_url=None):
     matches = re.findall(pattern, js_code)
     results = set()
@@ -61,9 +46,6 @@ def extract_endpoints(js_code, base_url=None):
             results.add(match)
     return results
 
-# ===============================
-# 📌 Получение базового URL из полного
-# ===============================
 def get_base_url(url):
     parsed = urlparse(url)
     path = parsed.path
@@ -74,9 +56,6 @@ def get_base_url(url):
     base = f"{parsed.scheme}://{parsed.netloc}{path}"
     return base
 
-# ===============================
-# 📌 Поиск секретов по ключевым словам
-# ===============================
 def find_secrets(js_code):
     found = set()
     for keyword in SECRET_KEYWORDS:
@@ -85,9 +64,6 @@ def find_secrets(js_code):
             found.add(f"{keyword}: {m}")
     return found
 
-# ===============================
-# 📌 Декодирование base64 и других популярных кодировок (URL, hex)
-# ===============================
 def decode_encoded_strings(js_code):
     decoded_strings = set()
     base64_pattern = re.compile(r'([A-Za-z0-9+/=]{8,})')
@@ -119,9 +95,6 @@ def decode_encoded_strings(js_code):
 
     return decoded_strings
 
-# ===============================
-# 📌 Проверка эндпоинтов на активность (HTTP статус 200)
-# ===============================
 def check_endpoint_active(url):
     try:
         resp = requests.head(url, timeout=5, allow_redirects=True)
@@ -131,9 +104,6 @@ def check_endpoint_active(url):
         pass
     return None
 
-# ===============================
-# 📌 Функция для печати логотипа
-# ===============================
 def print_logo():
     logo = r"""
   _____                 _             _       
@@ -147,24 +117,105 @@ def print_logo():
     print(logo)
     print("SecretLink - JS Endpoint & Secrets Extractor\n")
 
-# ===============================
-# 📌 Создание директорий для сохранения результатов
-# ===============================
 def prepare_output_dirs(base_dir, active_enabled):
-    dirs = {
-        "endpoints": os.path.join(base_dir, "endpoints"),
-        "secrets": os.path.join(base_dir, "secrets"),
-    }
+    # Создадим основную папку endpoints и внутри - maindomain и otherdomain
+    endpoints_base = os.path.join(base_dir, "endpoints")
+    maindomain_dir = os.path.join(endpoints_base, "maindomain")
+    otherdomain_dir = os.path.join(endpoints_base, "otherdomain")
+    
+    # Подкаталоги для каждого из них
+    subfolders = ["path", "content", "static"]
+
+    for parent in [maindomain_dir, otherdomain_dir]:
+        for sf in subfolders:
+            os.makedirs(os.path.join(parent, sf), exist_ok=True)
+
+    # Секреты
+    secrets_dir = os.path.join(base_dir, "secrets")
+    os.makedirs(secrets_dir, exist_ok=True)
+
+    # Папка active - только если активность проверяется
+    active_dir = None
     if active_enabled:
-        dirs["active"] = os.path.join(base_dir, "active")
+        active_dir = os.path.join(base_dir, "active")
+        os.makedirs(active_dir, exist_ok=True)
 
-    for d in dirs.values():
-        os.makedirs(d, exist_ok=True)
-    return dirs
+    return {
+        "endpoints": {
+            "maindomain": maindomain_dir,
+            "otherdomain": otherdomain_dir,
+            "subfolders": subfolders
+        },
+        "secrets": secrets_dir,
+        "active": active_dir
+    }
 
-# ===============================
-# 📌 Основная логика
-# ===============================
+def classify_and_save_endpoints(endpoints, base_domain, endpoints_dirs):
+    """
+    Разложить endpoints по папкам в зависимости от домена и типа файла (path, content, static)
+    """
+    def get_domain(url):
+        try:
+            return urlparse(url).netloc
+        except:
+            return ""
+
+    def get_path(url):
+        try:
+            return urlparse(url).path
+        except:
+            return ""
+
+    # Классификация по расширению
+    def classify_endpoint(url):
+        path = get_path(url).lower()
+        # content — картинки и медиа
+        content_exts = (".jpg", ".jpeg", ".png", ".svg", ".gif", ".webp", ".bmp", ".ico", ".tiff", ".heic", ".avif")
+        # static — файлы статики
+        static_exts = (".html", ".htm", ".js", ".css", ".json", ".xml", ".txt")
+
+        # Если нет пути или просто /
+        if path in ("", "/"):
+            return "path"
+
+        for ext in content_exts:
+            if path.endswith(ext):
+                return "content"
+
+        for ext in static_exts:
+            if path.endswith(ext):
+                return "static"
+
+        # Иначе классифицируем как path
+        return "path"
+
+    # Определяем, к какой папке домена отнести эндпоинт
+    def domain_type(domain):
+        return "maindomain" if domain == base_domain else "otherdomain"
+
+    # Сортируем endpoints по папкам и сохраняем в отдельные файлы
+    categorized = {
+        "maindomain": {sf: [] for sf in endpoints_dirs["subfolders"]},
+        "otherdomain": {sf: [] for sf in endpoints_dirs["subfolders"]},
+    }
+
+    for ep in endpoints:
+        dom = get_domain(ep)
+        d_type = domain_type(dom)
+        class_type = classify_endpoint(ep)
+        categorized[d_type][class_type].append(ep)
+
+    # Запишем в файлы в нужных папках
+    for d_type in ["maindomain", "otherdomain"]:
+        base_path = endpoints_dirs[d_type]
+        for sf in endpoints_dirs["subfolders"]:
+            lst = sorted(set(categorized[d_type][sf]))
+            if lst:
+                file_path = os.path.join(base_path, sf, f"{sf}_endpoints.txt")
+                with open(file_path, "a", encoding="utf-8") as f:
+                    for line in lst:
+                        f.write(line + "\n")
+
 def main():
     print_logo()
 
@@ -193,16 +244,23 @@ def main():
     if not urls:
         parser.error("Нужно указать хотя бы -u или -l")
 
-    # Если указан output-dir, подготовим папки (учитываем, создавать ли папку active)
     if args.output_dir:
         output_dirs = prepare_output_dirs(args.output_dir, active_enabled=args.active)
     else:
         output_dirs = {
-            "endpoints": ".",
-            "secrets": "."
+            "endpoints": {
+                "maindomain": "endpoints/maindomain",
+                "otherdomain": "endpoints/otherdomain",
+                "subfolders": ["path", "content", "static"]
+            },
+            "secrets": "secrets",
+            "active": "active" if args.active else None
         }
+        # Создаём папки на всякий случай, если нет output_dir
+        for d in [output_dirs["endpoints"]["maindomain"], output_dirs["endpoints"]["otherdomain"], output_dirs["secrets"]]:
+            os.makedirs(d, exist_ok=True)
         if args.active:
-            output_dirs["active"] = "."
+            os.makedirs(output_dirs["active"], exist_ok=True)
 
     for source in urls:
         print(f"\n[+] Идёт сканирование: {source}")
@@ -212,6 +270,8 @@ def main():
             base_url = args.base
             if not base_url and source.startswith(("http://", "https://")):
                 base_url = get_base_url(source)
+
+            base_domain = urlparse(base_url).netloc if base_url else ""
 
             decoded_strings = decode_encoded_strings(js_code)
             combined_code = js_code + "\n" + "\n".join(decoded_strings)
@@ -224,10 +284,8 @@ def main():
                 for ep in sorted(endpoints):
                     print(ep)
 
-                with open(os.path.join(output_dirs["endpoints"], "endpoints.txt"), "a", encoding="utf-8") as f:
-                    for ep in sorted(endpoints):
-                        f.write(ep + "\n")
-                print(f"[+] Эндпоинты сохранены в {os.path.join(output_dirs['endpoints'], 'endpoints.txt')}")
+                classify_and_save_endpoints(endpoints, base_domain, output_dirs["endpoints"])
+                print(f"[+] Эндпоинты разложены и сохранены в папках endpoints/maindomain и endpoints/otherdomain")
             else:
                 print("[-] Эндпоинтов не найдено.")
 
